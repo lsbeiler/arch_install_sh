@@ -1,0 +1,196 @@
+name: Teste
+run-name: Teste
+on: [push]
+jobs:
+  build_rootfs:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: install-dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt install \
+            zip \
+            procps \
+            debhelper-compat \
+            pkgconf \
+            python3-all \
+            sq \
+            patch \
+            git \
+            wget \
+            asciidoc-base \
+            docbook-xsl \
+            m4 \
+            xsltproc \
+            asciidoc \
+            curl \
+            doxygen \
+            fakechroot \
+            erofs-utils \
+            fakeroot \
+            help2man \
+            libarchive-dev \
+            libarchive-tools \
+            libcurl4-openssl-dev \
+            libgpgme-dev \
+            libssl-dev \
+            ca-certificates
+          sudo pip3 install meson
+          sudo pip3 install ninja
+      -
+        name: install-pacman
+        shell: bash
+        env:
+          PACMAN_VERSION: 6.0.2
+        run: |
+          sudo git clone --depth 1 https://github.com/archlinux/svntogit-packages -b packages/pacman pacman
+          pushd pacman
+            sudo wget https://sources.archlinux.org/other/pacman/pacman-${PACMAN_VERSION}.tar.xz
+            sudo tar -xvf pacman-${PACMAN_VERSION}.tar.xz
+            pushd pacman-${PACMAN_VERSION}
+              sudo meson --prefix=/usr \
+                        --buildtype=plain \
+                        -Ddoc=disabled \
+                        -Ddoxygen=enabled \
+                        -Dscriptlet-shell=/usr/bin/bash \
+                        -Dldconfig=/usr/bin/ldconfig \
+                        build
+              sudo meson compile -C build
+              sudo meson install -C build
+            popd
+            sudo install -m644 repos/core-x86_64/pacman.conf /etc/pacman.conf
+            sudo install -m644 repos/core-x86_64/makepkg.conf /etc/makepkg.conf
+            sudo mkdir -p /etc/pacman.d
+            sudo wget "https://archlinux.org/mirrorlist/?country=CA&country=US&protocol=https&use_mirror_status=on" -O /etc/pacman.d/mirrorlist
+            sudo sed -i 's/#Server/Server/' /etc/pacman.d/mirrorlist
+          popd
+      - 
+        name: install-arch-install-scripts
+        shell: bash
+        env:
+          VERSION: 28
+        run: |
+          sudo wget https://github.com/archlinux/arch-install-scripts/archive/refs/tags/v${VERSION}.tar.gz -O arch-install-scripts.tar.gz
+          sudo tar -xvf arch-install-scripts.tar.gz
+          sudo make -C arch-install-scripts-${VERSION}
+          sudo make -C arch-install-scripts-${VERSION} check
+          sudo make -C arch-install-scripts-${VERSION} PREFIX=/usr install      
+      - 
+        name: install-archlinux-keyring
+        shell: bash
+        run: |
+          sudo git clone https://gitlab.archlinux.org/archlinux/archlinux-keyring.git
+          pushd archlinux-keyring
+            sudo make build
+            sudo make check
+            sudo make PREFIX='/usr' install
+          popd    
+          sudo pacman-key --init
+          sudo pacman-key --populate archlinux
+          sudo pacman-key --updatedb
+      -
+        id: time
+        uses: boredland/get-time-action@2.0.0
+        with:
+          format: 'YYYYMMDD'
+      -
+        name: build-rootfs
+        shell: bash
+        env:
+          HOSTNAME: computer
+          ROOTFS_DIR: rootfs_dir
+          TIMEZONE: "America/Sao_Paulo"
+          LANGUAGE: "pt_BR.UTF-8"
+          # TODO: Expandir KERNEL_BOOT_PARAMS com os parâmetros necessários para dm-verity.
+          KERNEL_BOOT_PARAMS: "apparmor=1 security=apparmor lsm=lockdown,yama,apparmor quiet slab_nomerge init_on_alloc=1 init_on_free=1 page_alloc.shuffle=1 mce=0 oops=panic intel_iommu=on iommu=force iommu.strict=1 iommu.passthrough=0 vsyscall=none pti=on spectre_v2=on mds=full,nosmt efi=disable_early_pci_dma spec_store_bypass_disable=on tsx=off tsx_async_abort=full,nosmt l1tf=full,force nosmt=force kvm.nx_huge_pages=force randomize_kstack_offset=on debugfs=off ipv6.disable=1 libata.force=3.00:disable,3.00:norst extra_latent_entropy lockdown=confidentiality module.sig_enforce=1"
+          PACSTRAP_PACKAGES: "base base-devel neovim linux-hardened linux-hardened-headers intel-ucode intel-media-driver libva-intel-driver libvdpau-va-gl libva-utils vulkan-intel jq man-db btrfs-progs dracut binutils elfutils tpm2-tools sbctl linux-firmware wireguard-tools iwd zip dnscrypt-proxy openssh alacritty uutils-coreutils exa apparmor neofetch git unzip unrar ttf-opensans gptfdisk pipewire-pulse pavucontrol bubblewrap-suid irssi arti openbsd-netcat sqlmap nmap code chromium ttf-fantasque-sans-mono net-tools pamixer patchutils nodejs npm nano opendoas ttf-ubuntu-font-family capitaine-cursors sbsigntools ansible vagrant docker docker-compose terraform minikube zathura kanshi vulkan-headers vulkan-tools go kubectl pipewire-jack wireplumber checksec telegram-desktop qemu-base dnsmasq libvirt bridge-utils brightnessctl arch-repro-status plasma-wayland-session plasma-desktop plasma-pa kscreen kpipewire systemsettings"
+          # PACSTRAP_PACKAGES: "base base-devel"
+        run: |
+          sudo mkdir -pv $ROOTFS_DIR/efi
+          sudo mount --bind $ROOTFS_DIR $ROOTFS_DIR
+          
+
+          declare -A MOUNT_ARGS_FOR_PSEUDOFILESYSTEMS
+          # MOUNT_ARGS_FOR_PSEUDOFILESYSTEMS[proc]="-o nosuid,nodev,noexec,hidepid=2,gid=proc -t proc proc"
+          MOUNT_ARGS_FOR_PSEUDOFILESYSTEMS[tmp]="-o rw,relatime,nodev,nosuid,noexec,size=4G -t tmpfs tmpfs"
+          MOUNT_ARGS_FOR_PSEUDOFILESYSTEMS[var/tmp]="-o rw,relatime,nodev,nosuid,noexec,size=4G -t tmpfs tmpfs"
+          for key in "${!MOUNT_ARGS_FOR_PSEUDOFILESYSTEMS[@]}"; do
+            sudo mkdir -pv $ROOTFS_DIR/${key}
+            sudo mount ${MOUNT_ARGS_FOR_PSEUDOFILESYSTEMS[$key]} $ROOTFS_DIR/${key}
+          done
+
+          sudo pacstrap -G $ROOTFS_DIR $PACSTRAP_PACKAGES
+
+          echo ${HOSTNAME} | sudo tee  $ROOTFS_DIR/etc/hostname >/dev/null
+          sudo sed -i 's/#Color/Color/' $ROOTFS_DIR/etc/pacman.conf
+          sudo  sed -i 's/#TotalDownload/TotalDownload/' $ROOTFS_DIR/etc/pacman.conf
+
+          # TODO: iptables
+          # TODO: iwd e systemd-networkd
+
+          LOCALES=("pt_BR.UTF-8 UTF-8" "pt_BR ISO-8859-1")
+          for LCL in "${LOCALES[@]}"; do
+            sudo  sed -i "s/#$LCL/$LCL/" $ROOTFS_DIR/etc/locale.gen
+          done
+          sudo arch-chroot $ROOTFS_DIR locale-gen
+          echo LANG=${LANGUAGE} | sudo tee -a $ROOTFS_DIR/etc/locale.conf >/dev/null
+          sudo arch-chroot $ROOTFS_DIR ln -sf /usr/share/zoneinfo/${TIMEZONE} /etc/localtime
+
+          echo 'permit persist :wheel' | sudo tee  $ROOTFS_DIR/etc/doas.conf >/dev/null
+          sudo arch-chroot $ROOTFS_DIR ln -sf /usr/bin/doas /usr/bin/sudo
+
+          echo -en "[Login]\nHandleLidSwitch=ignore\nHandleLidSwitchExternalPower=ignore\nHandleLidSwitchDocked=ignore" | sudo tee  $ROOTFS_DIR/etc/systemd/logind.conf >/dev/null
+          
+          MODPROBE_BLACKLIST=('bluetooth' 'btusb' 'dccp' 'sctp' 'rds' 'tipc' 'n-hdlc' 'ax25' 'netrom' 'x25' 'rose' 'decnet' 'econet' 'af_802154' 'ipx' 'appletalk' 'psnap' 'p8023' 'p8022' 'can' 'atm' 'cramfs' 'freevxfs' 'jffs2' 'hfs' 'hfsplus' 'squashfs' 'udf' 'cifs' 'nfs' 'nfsv3' 'nfsv4' 'gfs2' 'vivid' 'mei' 'mei-me' 'mei_me' 'mei_hdcp' 'mei_pxp'  'ath_pci' 'thunderbolt' 'firewire-core' 'firewire_core' 'firewire-ohci' 'firewire_ohci' 'firewire_sbp2' 'firewire-sbp2' 'ohci1394' 'sbp2' 'dv1394' 'raw1394' 'video1394' 'msr' 'evbug' 'eepro100' 'cdrom' 'sr_mod')
+          for modulo in "${MODPROBE_BLACKLIST[@]}"
+          do
+            echo "install ${modulo} /bin/true" | sudo tee -a  $ROOTFS_DIR/etc/modprobe.d/blacklist.conf >/dev/null
+          done
+
+          KERNEL_SYSCTL_PARAMS=('kernel.yama.ptrace_scope = 3' 'dev.tty.ldisc_autoload = 0' 'fs.protected_fifos = 2' 'fs.protected_regular = 2' 'kernel.sysrq = 0' 'net.ipv4.tcp_sack = 0' 'net.ipv4.tcp_dsack=0' 'net.ipv4.tcp_fack=0' 'fs.suid_dumpable=0' 'net.ipv4.tcp_rfc1337=1' 'kernel.kexec_load_disabled=1' 'user.max_user_namespaces=0' 'vm.unprivileged_userfaultfd=0' 'net.ipv4.conf.all.rp_filter=1' 'net.ipv4.conf.default.rp_filter=1' 'net.ipv4.conf.all.accept_redirects=0' 'net.ipv4.conf.default.accept_redirects=0' 'net.ipv4.conf.all.secure_redirects=0' 'net.ipv4.conf.default.secure_redirects=0' 'net.ipv6.conf.all.accept_redirects=0' 'net.ipv6.conf.default.accept_redirects=0' 'net.ipv4.conf.all.send_redirects=0' 'net.ipv4.conf.default.send_redirects=0' 'net.ipv4.icmp_echo_ignore_all=1' 'net.ipv4.conf.all.accept_source_route=0' 'net.ipv4.conf.default.accept_source_route=0' 'net.ipv6.conf.all.accept_source_route=0' 'net.ipv6.conf.default.accept_source_route=0' 'net.ipv6.conf.all.accept_ra=0' 'net.ipv6.conf.default.accept_ra=0')
+          for item in "${KERNEL_SYSCTL_PARAMS[@]}"
+          do
+            echo "$item" | sudo tee -a  $ROOTFS_DIR/etc/sysctl.d/params.conf >/dev/null
+          done
+
+          sudo patch $ROOTFS_DIR/etc/dnscrypt-proxy/dnscrypt-proxy.toml $(sudo find ~/ -name 'patch_dnscryptproxy_toml.patch')
+          sudo arch-chroot $ROOTFS_DIR systemctl enable apparmor iptables iwd dnscrypt-proxy.socket systemd-homed
+          echo -en "nameserver 127.0.0.1\noptions edns0 single-request-reopen" | sudo tee $ROOTFS_DIR/etc/resolv.conf >/dev/null
+          sudo chattr +i $ROOTFS_DIR/etc/resolv.conf
+
+          # TODO: Incluir certs e keys corretos para o Secure Boot. Garantir fstab correto.
+          # echo -en 'uefi_secureboot_cert="/usr/share/secureboot/keys/db/db.pem"\nuefi_secureboot_key="/usr/share/secureboot/keys/db/db.key"' | sudo tee $ROOTFS_DIR/etc/dracut.conf.d/50-secure-boot.conf >/dev/null
+          echo -en 'add_dracutmodules+=" tpm2-tss "' | sudo tee $ROOTFS_DIR/etc/dracut.conf.d/50-tpm2.conf >/dev/null
+          echo -en 'use_fstab="yes"\nadd_fstab+=" /etc/fstab "' | sudo tee $ROOTFS_DIR/etc/dracut.conf.d/50-fstab.conf >/dev/null
+          echo -en "reproducible=\"yes\"\nuefi=\"yes\"\nearly_microcode=\"yes\"\nkernel_cmdline=\"${KERNEL_BOOT_PARAMS}\"\nhostonly=\"no\"\nhostonly_cmdline=\"no\"" | sudo tee $ROOTFS_DIR/etc/dracut.conf.d/50-host-only.conf >/dev/null
+
+
+          sudo genfstab -L -P $ROOTFS_DIR | sudo tee -a $ROOTFS_DIR/etc/fstab >/dev/null # TODO: Garantir fstab correto e incluído na UKI.
+          # sudo arch-chroot $ROOTFS_DIR sbctl sign -s /usr/lib/systemd/boot/efi/systemd-bootx64.efi # TODO: Assinar esse arquivo e distribuir dentro do rootfs.
+          sudo arch-chroot $ROOTFS_DIR dracut  -f --uefi uki-${{ steps.time.outputs.time }}.efi --kver $(ls $ROOTFS_DIR/usr/lib/modules/ | grep -i hardened)  # TODO: Assinar esse arquivo.
+          # sudo arch-chroot $ROOTFS_DIR bootctl install -- Este comando será rodado durante instalações e updates para colocar o /usr/lib/systemd/boot/efi/systemd-bootx64.efi na ESP.
+
+          # sudo mkfs.erofs -zlz4hc rootfs-${{ steps.time.outputs.time }} $ROOTFS_DIR
+          sudo mkfs.erofs rootfs-${{ steps.time.outputs.time }} $ROOTFS_DIR
+          sudo mv $ROOTFS_DIR/uki-${{ steps.time.outputs.time }}.efi . && sudo chown $(id -u):$(id -g) uki-${{ steps.time.outputs.time }}.efi
+          #sudo xz rootfs-${{ steps.time.outputs.time }} # TODO: LENTO
+      -
+        id: 'auth'
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v1'
+        with:
+          credentials_json: '${{ secrets.GCP_KEY }}'
+      -
+        id: 'upload-rootfs'
+        uses: 'google-github-actions/upload-cloud-storage@v1'
+        with:
+          path: rootfs-${{ steps.time.outputs.time }}
+          destination: 'my-rootfs-releases/'
+      -
+        id: 'upload-uki'
+        uses: 'google-github-actions/upload-cloud-storage@v1'
+        with:
+          path: uki-${{ steps.time.outputs.time }}.efi
+          destination: 'my-rootfs-releases/'
